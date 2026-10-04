@@ -1,0 +1,8 @@
+.env
+connections.json
+pending_deals.json
+messages.log
+__pycache__/
+*.pyc
+.venv/
+venv/
