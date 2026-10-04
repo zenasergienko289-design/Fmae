@@ -78,10 +78,10 @@ def save_connections():
 
 
 # ---------- Premium-эмодзи ----------
-EMOJI_ACCEPT = "5774022692642492953"    # ✅
-EMOJI_DECLINE = "5774077015388852135"   # ❌
-EMOJI_GIFT = "5774022692642492953"      # 🎁 замени на свой ID
-EMOJI_CONFIRM = "5774022692642492953"   # ✅ замени на свой ID
+EMOJI_ACCEPT = "5774022692642492953"
+EMOJI_DECLINE = "5774077015388852135"
+EMOJI_GIFT = "5774022692642492953"      # замени
+EMOJI_CONFIRM = "5774022692642492953"   # замени
 
 
 # ---------- Кнопки ----------
@@ -102,7 +102,11 @@ def offer_kb(lang: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def deal_kb(lang: str, target_username: str = "katedsx") -> InlineKeyboardMarkup:
+def deal_kb(lang: str, target_username: str) -> InlineKeyboardMarkup:
+    """
+    target_username — username ТОГО, КТО СОЗДАЛ СДЕЛКУ (продавца).
+    Ссылка на подарок ведёт на него.
+    """
     t = TEXTS[lang]
     gift_url = f"tg://send_gift?to={target_username}"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -231,14 +235,16 @@ async def on_business_message(message: types.Message):
 
     gift_name = parse_gift_name(link)
     order_id = gen_order_id()
-    target_username = username or ""
+
+    # ⚠️ Тот, кто написал команду = тот, на кого ведёт ссылка подарка
+    seller_username = username or ""
 
     pending_deals[chat_id] = {
         "amount": amount,
         "currency": currency,
         "gift_name": gift_name,
         "buyer_username": username or "",
-        "target_username": target_username,
+        "target_username": seller_username,
         "order_id": order_id,
         "connection_id": connection_id,
         "lang": lang,
@@ -309,7 +315,8 @@ async def on_accept(call: types.CallbackQuery):
                 buyer_username=deal["buyer_username"],
                 gift_name=deal["gift_name"],
             ),
-            reply_markup=deal_kb(lang, "katedsx"),
+            # ⚠️ Ссылка ведёт на ТОГО, КТО СОЗДАЛ СДЕЛКУ
+            reply_markup=deal_kb(lang, deal.get("target_username", "")),
         )
     except Exception as e:
         print(f"[SEND ERROR] {e}")
